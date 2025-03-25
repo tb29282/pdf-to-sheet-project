@@ -3,14 +3,45 @@ import pandas as pd
 import base64
 import re
 import os
+import json
+import time
 from google.cloud import documentai
 from google.api_core.client_options import ClientOptions
+
+# Add loading state
+if 'loading' not in st.session_state:
+    st.session_state.loading = False
 
 # Get environment variables for sensitive data
 PASSWORD = os.environ.get('APP_PASSWORD', 'carteclinics')  # Default for development only
 PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT_ID')
 PROCESSOR_ID = os.environ.get('DOCUMENT_AI_PROCESSOR_ID')
 LOCATION = os.environ.get('DOCUMENT_AI_LOCATION', 'us')
+
+# Handle Google Cloud credentials
+def setup_google_credentials():
+    """Set up Google Cloud credentials from environment variable."""
+    try:
+        credentials_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
+        if credentials_json:
+            # Decode base64 credentials if needed
+            try:
+                credentials_json = base64.b64decode(credentials_json).decode('utf-8')
+            except:
+                pass
+            
+            # Write credentials to a temporary file
+            credentials_path = "google_credentials.json"
+            with open(credentials_path, "w") as f:
+                f.write(credentials_json)
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
+            return True
+        else:
+            st.warning("Google Cloud credentials not found in environment variables")
+            return False
+    except Exception as e:
+        st.error(f"Error setting up Google credentials: {str(e)}")
+        return False
 
 # Add security headers
 st.set_page_config(
@@ -40,48 +71,52 @@ def process_document_sample(
     """
     Processes a document with Google Document AI and extracts specified entities.
     """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"The file '{file_path}' does not exist.")
+    try:
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"The file '{file_path}' does not exist.")
 
-    # Configure API endpoint
-    opts = ClientOptions(api_endpoint=f"{location}-documentai.googleapis.com")
-    client = documentai.DocumentProcessorServiceClient(client_options=opts)
+        # Configure API endpoint
+        opts = ClientOptions(api_endpoint=f"{location}-documentai.googleapis.com")
+        client = documentai.DocumentProcessorServiceClient(client_options=opts)
 
-    # Construct the processor name
-    name = client.processor_path(project_id, location, processor_id)
+        # Construct the processor name
+        name = client.processor_path(project_id, location, processor_id)
 
-    # Read file content
-    with open(file_path, "rb") as document_file:
-        document_content = document_file.read()
+        # Read file content
+        with open(file_path, "rb") as document_file:
+            document_content = document_file.read()
 
-    # Create the raw document request
-    raw_document = documentai.RawDocument(content=document_content, mime_type=mime_type)
-    request = documentai.ProcessRequest(
-        name=name,
-        raw_document=raw_document,
-        field_mask=field_mask,
-    )
+        # Create the raw document request
+        raw_document = documentai.RawDocument(content=document_content, mime_type=mime_type)
+        request = documentai.ProcessRequest(
+            name=name,
+            raw_document=raw_document,
+            field_mask=field_mask,
+        )
 
-    # Execute
-    result = client.process_document(request=request)
-    document = result.document
+        # Execute
+        result = client.process_document(request=request)
+        document = result.document
 
-    # Write output to text file
-    with open(output_file, "w") as output:
-        if document.text:
-            output.write("Extracted Text:\n")
-            output.write(document.text + "\n\n")
+        # Write output to text file
+        with open(output_file, "w") as output:
+            if document.text:
+                output.write("Extracted Text:\n")
+                output.write(document.text + "\n\n")
 
-        if document.entities:
-            output.write("Extracted Entities:\n")
-            for entity in document.entities:
-                if not target_entities or entity.type_ in target_entities:
-                    output.write(f"{entity.type_}: {entity.mention_text}\n")
-        else:
-            output.write("No entities found in the document.\n")
+            if document.entities:
+                output.write("Extracted Entities:\n")
+                for entity in document.entities:
+                    if not target_entities or entity.type_ in target_entities:
+                        output.write(f"{entity.type_}: {entity.mention_text}\n")
+            else:
+                output.write("No entities found in the document.\n")
 
-    print(f"Document AI output saved to: {output_file}")
-    return output_file
+        print(f"Document AI output saved to: {output_file}")
+        return output_file
+    except Exception as e:
+        st.error(f"Error in Document AI processing: {str(e)}")
+        return None
 
 
 def parse_output(file_path: str):
@@ -211,109 +246,118 @@ def main_app():
     The main application where the user uploads a PDF, sees a PDF viewer, 
     and an editable CSV side-by-side.
     """
-    st.title("PDF to Sheet Converter")
-    
-    # Add some information about the app
-    st.sidebar.title("About")
-    st.sidebar.info(
-        "This application allows you to convert PDF documents to editable spreadsheets "
-        "using Google Document AI. Upload your PDF and get structured data in return."
-    )
-    
-    # Add usage instructions
-    st.sidebar.title("Instructions")
-    st.sidebar.markdown("""
-    1. Upload your PDF using the uploader
-    2. Click 'Process Document' to extract data
-    3. Edit the resulting table as needed
-    4. Download the edited CSV
-    """)
+    try:
+        st.title("PDF to Sheet Converter")
+        
+        # Add some information about the app
+        st.sidebar.title("About")
+        st.sidebar.info(
+            "This application allows you to convert PDF documents to editable spreadsheets "
+            "using Google Document AI. Upload your PDF and get structured data in return."
+        )
+        
+        # Add usage instructions
+        st.sidebar.title("Instructions")
+        st.sidebar.markdown("""
+        1. Upload your PDF using the uploader
+        2. Click 'Process Document' to extract data
+        3. Edit the resulting table as needed
+        4. Download the edited CSV
+        """)
 
-    # Prepare session state for DataFrame
-    if "df" not in st.session_state:
-        st.session_state["df"] = None
+        # Check Google Cloud credentials
+        if not setup_google_credentials():
+            st.error("Google Cloud credentials not properly configured. Please check your environment variables.")
+            return
 
-    # Two columns side by side with a large gap
-    col1, col2 = st.columns(2, gap="large")
+        # Prepare session state for DataFrame
+        if "df" not in st.session_state:
+            st.session_state["df"] = None
 
-    with col1:
-        st.subheader("PDF View")
-        uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
-        if uploaded_file is not None:
-            pdf_file_path = "temp_upload.pdf"
-            with open(pdf_file_path, "wb") as f:
-                f.write(uploaded_file.getvalue())
-            display_pdf_in_iframe(pdf_file_path, width=450, height=700)
-            
-            # Clean up the temporary file
-            if os.path.exists(pdf_file_path):
-                try:
-                    os.remove(pdf_file_path)
-                except Exception as e:
-                    st.error(f"Error cleaning up temporary file: {e}")
-        else:
-            st.info("Please upload a PDF to view it here.")
+        # Two columns side by side with a large gap
+        col1, col2 = st.columns(2, gap="large")
 
-    with col2:
-        st.subheader("Editable CSV")
-        if uploaded_file is not None:
-            if st.button("Process Document with Document AI"):
-                if not all([PROJECT_ID, PROCESSOR_ID]):
-                    st.error("Missing required environment variables for Document AI")
-                    return
-                    
-                st.info("Running Document AI...")
-                try:
-                    # 1) Document AI
-                    output_text_file = "output.txt"
-                    process_document_sample(
-                        project_id=PROJECT_ID,
-                        location=LOCATION,
-                        processor_id=PROCESSOR_ID,
-                        file_path=pdf_file_path,
-                        mime_type="application/pdf",
-                        output_file=output_text_file,
-                        target_entities=["dateoftest", "TestTypeandResult"]
-                    )
+        with col1:
+            st.subheader("PDF View")
+            uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+            if uploaded_file is not None:
+                pdf_file_path = "temp_upload.pdf"
+                with open(pdf_file_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+                display_pdf_in_iframe(pdf_file_path, width=450, height=700)
+                
+                # Clean up the temporary file
+                if os.path.exists(pdf_file_path):
+                    try:
+                        os.remove(pdf_file_path)
+                    except Exception as e:
+                        st.error(f"Error cleaning up temporary file: {e}")
+            else:
+                st.info("Please upload a PDF to view it here.")
 
-                    # 2) Convert text -> CSV
-                    output_csv_file = "results.csv"
-                    convert_to_csv(output_text_file, output_csv_file)
+        with col2:
+            st.subheader("Editable CSV")
+            if uploaded_file is not None:
+                if st.button("Process Document with Document AI"):
+                    if not all([PROJECT_ID, PROCESSOR_ID]):
+                        st.error("Missing required environment variables for Document AI")
+                        return
+                        
+                    with st.spinner("Processing document..."):
+                        try:
+                            # 1) Document AI
+                            output_text_file = "output.txt"
+                            if process_document_sample(
+                                project_id=PROJECT_ID,
+                                location=LOCATION,
+                                processor_id=PROCESSOR_ID,
+                                file_path=pdf_file_path,
+                                mime_type="application/pdf",
+                                output_file=output_text_file,
+                                target_entities=["dateoftest", "TestTypeandResult"]
+                            ):
 
-                    # 3) Load into session state
-                    df = pd.read_csv(output_csv_file)
-                    st.session_state["df"] = df
-                    
-                    # Clean up temporary files
-                    for temp_file in [output_text_file, output_csv_file]:
-                        if os.path.exists(temp_file):
-                            try:
-                                os.remove(temp_file)
-                            except Exception as e:
-                                st.error(f"Error cleaning up temporary file: {e}")
+                                # 2) Convert text -> CSV
+                                output_csv_file = "results.csv"
+                                convert_to_csv(output_text_file, output_csv_file)
+
+                                # 3) Load into session state
+                                df = pd.read_csv(output_csv_file)
+                                st.session_state["df"] = df
                                 
-                except Exception as e:
-                    st.error(f"Error processing document: {str(e)}")
+                                # Clean up temporary files
+                                for temp_file in [output_text_file, output_csv_file]:
+                                    if os.path.exists(temp_file):
+                                        try:
+                                            os.remove(temp_file)
+                                        except Exception as e:
+                                            st.error(f"Error cleaning up temporary file: {e}")
+                                            
+                        except Exception as e:
+                            st.error(f"Error processing document: {str(e)}")
 
-        # If we have a DataFrame, let the user edit it
-        if st.session_state["df"] is not None:
-            st.write("Below is your editable DataFrame. Make changes as needed.")
-            edited_df = st.data_editor(
-                st.session_state["df"],
-                height=600,
-                use_container_width=True
-            )
-            # Update session with the user's edits
-            st.session_state["df"] = edited_df
+            # If we have a DataFrame, let the user edit it
+            if st.session_state["df"] is not None:
+                st.write("Below is your editable DataFrame. Make changes as needed.")
+                edited_df = st.data_editor(
+                    st.session_state["df"],
+                    height=600,
+                    use_container_width=True
+                )
+                # Update session with the user's edits
+                st.session_state["df"] = edited_df
 
-            # Provide a download button for the edited CSV
-            csv_data = edited_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Edited CSV",
-                data=csv_data,
-                file_name="edited_results.csv",
-                mime="text/csv"
-            )
+                # Provide a download button for the edited CSV
+                csv_data = edited_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    label="Download Edited CSV",
+                    data=csv_data,
+                    file_name="edited_results.csv",
+                    mime="text/csv"
+                )
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {str(e)}")
+        st.stop()
 
 
 # -----------------------------
